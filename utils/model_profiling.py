@@ -167,22 +167,22 @@ def model_profiling(model, height, width, batch=1, channel=3, use_cuda=True,
     model = model.to(device)
     data = data.to(device)
     model.apply(lambda m: add_profiling_hooks(m, verbose=verbose))
-    print(
-        'Item'.ljust(name_space, ' ') +
-        'params'.rjust(macs_space, ' ') +
-        'macs'.rjust(macs_space, ' ') +
-        'nanosecs'.rjust(seconds_space, ' '))
     if verbose:
+        print(
+            'Item'.ljust(name_space, ' ') +
+            'params'.rjust(macs_space, ' ') +
+            'macs'.rjust(macs_space, ' ') +
+            'nanosecs'.rjust(seconds_space, ' '))
         print(''.center(
             name_space + params_space + macs_space + seconds_space, '-'))
     model(data)
     if verbose:
         print(''.center(
             name_space + params_space + macs_space + seconds_space, '-'))
-    print(
-        'Total'.ljust(name_space, ' ') +
-        '{:,}'.format(model.n_params).rjust(params_space, ' ') +
-        '{:,}'.format(model.n_macs).rjust(macs_space, ' ') +
-        '{:,}'.format(model.n_seconds).rjust(seconds_space, ' '))
+        print(
+            'Total'.ljust(name_space, ' ') +
+            '{:,}'.format(model.n_params).rjust(params_space, ' ') +
+            '{:,}'.format(model.n_macs).rjust(macs_space, ' ') +
+            '{:,}'.format(model.n_seconds).rjust(seconds_space, ' '))
     remove_profiling_hooks()
     return model.n_macs, model.n_params

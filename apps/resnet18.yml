@@ -5,7 +5,7 @@ dataset_dir: /data/seed_1993_subset_100_imagenet_500/data/
 data_loader_workers: 8
 
 # info
-num_classes: 1000
+num_classes: 100
 image_resize: 256
 image_size: 224
 num_epochs: 120
@@ -30,12 +30,19 @@ batch_size: 512
 
 log_dir: logs/
 model: models.resnet
-depth: 50
+depth: 18
 reset_parameters: True
-width_mult_list: [0.9, 1.0]
-width_mult_range: [0.9, 1.0]
+width_list: [1.0,0.95,0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5]
+subnet_chnls: [[64, 64, 64, 64, 64, 128, 128, 128, 128, 256, 256, 256, 256, 512, 512, 512, 512]]
 resolution_list: [224, 192, 160, 128]
 # test pretrained resume
 test_only: False
 pretrained: ''
 resume: ''
+
+# EB
+sparsity: 0.0001
+threshold: 0.1
+epoch_keep: 5
+# other
+test_name: '18_test'

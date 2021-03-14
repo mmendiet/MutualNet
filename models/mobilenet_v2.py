@@ -2,7 +2,7 @@ import math
 import torch.nn as nn
 
 
-from .slimmable_ops import USBatchNorm2d, USConv2d, make_divisible
+from .slimmable_ops import USBatchNorm2d, USConv2d
 from utils.config import FLAGS
 
 
@@ -50,7 +50,7 @@ class InvertedResidual(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, num_classes=1000, input_size=224):
+    def __init__(self, num_classes=1000):
         super(Model, self).__init__()
 
         # setting of inverted residual blocks
@@ -70,9 +70,8 @@ class Model(nn.Module):
         self.features = []
 
         # head
-        assert input_size % 32 == 0
-        channels = make_divisible(32)
-        self.outp = make_divisible(1280)
+        channels = 32
+        self.outp = 1280
         first_stride = 2
         self.features.append(
             nn.Sequential(
@@ -85,7 +84,7 @@ class Model(nn.Module):
 
         # body
         for t, c, n, s in self.block_setting:
-            outp = make_divisible(c)
+            outp = c
             for i in range(n):
                 if i == 0:
                     self.features.append(

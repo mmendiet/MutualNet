@@ -1,128 +1,196 @@
 import torch.nn as nn
-import math
-
-
-from .slimmable_ops import USBatchNorm2d
-from .slimmable_ops import USConv2d, USLinear, make_divisible
+from .slimmable_ops import USConv2d, USBatchNorm2d, USLinear
 from utils.config import FLAGS
 
 
-class Block(nn.Module):
-    def __init__(self, inp, outp, stride, tmp_ratio=1.0):
-        super(Block, self).__init__()
-        assert stride in [1, 2]
+def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
+    """3x3 convolution with padding"""
+    return USConv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                     padding=dilation, groups=groups, bias=False, dilation=dilation)
 
-        midp = make_divisible(outp // 4)
-        expand_ratio = 0.25
-        layers = [
-            USConv2d(inp, midp, 1, 1, 0, bias=False, ratio=[tmp_ratio, expand_ratio]),
-            USBatchNorm2d(midp, ratio=expand_ratio),
-            nn.ReLU(inplace=True),
 
-            USConv2d(midp, midp, 3, stride, 1, bias=False, ratio=[expand_ratio, expand_ratio]),
-            USBatchNorm2d(midp, ratio=expand_ratio),
-            nn.ReLU(inplace=True),
+def conv1x1(in_planes, out_planes, stride=1):
+    """1x1 convolution"""
+    return USConv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
-            USConv2d(midp, outp, 1, 1, 0, bias=False, ratio=[expand_ratio, 1]),
-            USBatchNorm2d(outp),
-        ]
-        self.body = nn.Sequential(*layers)
 
-        self.residual_connection = stride == 1 and inp == outp
-        if not self.residual_connection:
-            self.shortcut = nn.Sequential(
-                USConv2d(inp, outp, 1, stride=stride, bias=False, ratio=[tmp_ratio, 1]),
-                USBatchNorm2d(outp),
-            )
-        self.post_relu = nn.ReLU(inplace=True)
+class BasicBlock(nn.Module):
+    expansion = 1
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
+                 base_width=64, dilation=1, norm_layer=None):
+        super(BasicBlock, self).__init__()
+        if groups != 1 or base_width != 64:
+            raise ValueError('BasicBlock only supports groups=1 and base_width=64')
+        if dilation > 1:
+            raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
+        # Both self.conv1 and self.downsample layers downsample the input when stride != 1
+        self.conv1 = conv3x3(inplanes, planes, stride)
+        self.bn1 = norm_layer(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = conv3x3(planes, planes)
+        self.bn2 = norm_layer(planes)
+        self.downsample = downsample
+        self.stride = stride
 
     def forward(self, x):
-        if self.residual_connection:
-            res = self.body(x)
-            res += x
-        else:
-            res = self.body(x)
-            res += self.shortcut(x)
-        res = self.post_relu(res)
-        return res
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out = out + identity
+        out = self.relu(out)
+
+        return out
+
+
+class Bottleneck(nn.Module):
+    expansion = 4
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
+                 base_width=64, dilation=1, norm_layer=None):
+        super(Bottleneck, self).__init__()
+        width = int(planes * (base_width / 64.)) * groups
+        # Both self.conv2 and self.downsample layers downsample the input when stride != 1
+        self.conv1 = conv1x1(inplanes, width)
+        self.bn1 = norm_layer(width)
+        self.conv2 = conv3x3(width, width, stride, groups, dilation)
+        self.bn2 = norm_layer(width)
+        self.conv3 = conv1x1(width, planes * self.expansion)
+        self.bn3 = norm_layer(planes * self.expansion)
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x):
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out = out + identity
+        out = self.relu(out)
+
+        return out
 
 
 class Model(nn.Module):
-    def __init__(self, num_classes=1000, input_size=224):
+
+    def __init__(self, num_classes=1000, zero_init_residual=False,
+                 groups=1, width_per_group=64, replace_stride_with_dilation=None,
+                 norm_layer=USBatchNorm2d):
         super(Model, self).__init__()
+        if FLAGS.depth==18:
+            block, layers = BasicBlock, [2, 2, 2, 2]
+        elif FLAGS.depth==50:
+            block, layers = Bottleneck, [3, 4, 6, 3]
+        else:
+            print("Invalid depth")
+        self._norm_layer = norm_layer
 
-        self.features = []
-        # head
-        assert input_size % 32 == 0
+        self.inplanes = 64
+        self.dilation = 1
+        if replace_stride_with_dilation is None:
+            # each element in the tuple indicates if we should replace
+            # the 2x2 stride with a dilated convolution instead
+            replace_stride_with_dilation = [False, False, False]
+        if len(replace_stride_with_dilation) != 3:
+            raise ValueError("replace_stride_with_dilation should be None "
+                             "or a 3-element tuple, got {}".format(replace_stride_with_dilation))
+        self.groups = groups
+        self.base_width = width_per_group
+        self.conv1 = USConv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
+        self.bn1 = norm_layer(self.inplanes)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, dilate=replace_stride_with_dilation[0])
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2, dilate=replace_stride_with_dilation[1])
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2, dilate=replace_stride_with_dilation[2])
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = USLinear(512 * block.expansion, num_classes)
 
-        # setting of inverted residual blocks
-        self.block_setting_dict = {
-            # : [stage1, stage2, stage3, stage4]
-            50: [3, 4, 6, 3],
-            101: [3, 4, 23, 3],
-            152: [3, 8, 36, 3],
-        }
-        init_channel = 64
-        channels = make_divisible(init_channel)
-        self.block_setting = self.block_setting_dict[FLAGS.depth]
-        feats = [64, 128, 256, 512]
-        self.features.append(
-            nn.Sequential(
-                USConv2d(
-                    3, channels, 7, 2, 3,
-                    bias=False, us=[False, True], ratio=[1, 0.25]),
-                USBatchNorm2d(channels, ratio=0.25),
-                nn.ReLU(inplace=True),
-                nn.MaxPool2d(3, 2, 1),
-            )
-        )
-
-        # body
-        for stage_id, n in enumerate(self.block_setting):
-            outp = make_divisible(feats[stage_id] * 4)
-            for i in range(n):
-                if i == 0 and stage_id != 0:
-                    self.features.append(Block(channels, outp, 2))
-                elif i == 0 and stage_id == 0:
-                    self.features.append(Block(channels, outp, 1, tmp_ratio=0.25))
+        layer_idx = 0
+        for n, m in self.named_modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if 'downsample' in n:
+                    m.layer_idx = layer_idx-1
+                    m.shortcut = True
                 else:
-                    self.features.append(Block(channels, outp, 1))
-                channels = outp
+                    m.layer_idx = layer_idx
+                    layer_idx+=1
+            elif isinstance(m, (nn.BatchNorm2d)):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, USBatchNorm2d):
+                m.layer_idx = layer_idx-1
 
-        # avg_pool_size = input_size // 32
-        # self.features.append(nn.AvgPool2d(avg_pool_size))
-        self.features.append(nn.AdaptiveAvgPool2d(output_size=(1, 1)))
+        # Zero-initialize the last BN in each residual branch,
+        # so that the residual branch starts with zeros, and each residual block behaves like an identity.
+        # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
+        if zero_init_residual:
+            for m in self.modules():
+                if isinstance(m, Bottleneck):
+                    nn.init.constant_(m.bn3.weight, 0)
+                elif isinstance(m, BasicBlock):
+                    nn.init.constant_(m.bn2.weight, 0)
 
-        # make it nn.Sequential
-        self.features = nn.Sequential(*self.features)
+    def _make_layer(self, block, planes, blocks, stride=1, dilate=False):
+        norm_layer = self._norm_layer
+        downsample = None
+        previous_dilation = self.dilation
+        if dilate:
+            self.dilation *= stride
+            stride = 1
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                conv1x1(self.inplanes, planes * block.expansion, stride),
+                norm_layer(planes * block.expansion))
 
-        # classifier
-        self.outp = channels
-        self.classifier = nn.Sequential(
-            USLinear(self.outp, num_classes, us=[True, False])
-        )
-        if FLAGS.reset_parameters:
-            self.reset_parameters()
+        layers = []
+        layers.append(block(self.inplanes, planes, stride, downsample, self.groups,
+                            self.base_width, previous_dilation, norm_layer))
+        self.inplanes = planes * block.expansion
+        for _ in range(1, blocks):
+            layers.append(block(self.inplanes, planes, groups=self.groups,
+                                base_width=self.base_width, dilation=self.dilation,
+                                norm_layer=norm_layer))
+
+        return nn.Sequential(*layers)
 
     def forward(self, x):
-        x = self.features(x)
-        last_dim = x.size()[1]
-        x = x.view(-1, last_dim)
-        x = self.classifier(x)
-        return x
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
 
-    def reset_parameters(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-                m.weight.data.normal_(0, math.sqrt(2. / n))
-                if m.bias is not None:
-                    m.bias.data.zero_()
-            elif isinstance(m, nn.BatchNorm2d):
-                if m.affine:
-                    m.weight.data.fill_(1)
-                    m.bias.data.zero_()
-            elif isinstance(m, nn.Linear):
-                n = m.weight.size(1)
-                m.weight.data.normal_(0, 0.01)
-                m.bias.data.zero_()
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+
+        x = self.avgpool(x)
+        x = x.reshape(x.size(0), -1)
+        x = self.fc(x)
+
+        return x
